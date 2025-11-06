@@ -1,6 +1,5 @@
 """
-Face Recognition Service - Integrates with your ML model
-Works with new database structure (branch, year, section based)
+Enhanced Face Recognition Service with Image Quality Checks
 """
 
 import face_recognition
@@ -18,23 +17,104 @@ class FaceRecognitionService:
         self.student_model = Student()
         self.tolerance = Config.RECOGNITION_TOLERANCE if hasattr(Config, 'RECOGNITION_TOLERANCE') else 0.46
         self.model = Config.DETECTION_MODEL if hasattr(Config, 'DETECTION_MODEL') else 'hog'
-        
-        # Cache for loaded encodings
+        # Use config values or defaults
+        self.BLUR_THRESHOLD = getattr(Config, 'BLUR_THRESHOLD', 50.0)
+        self.MIN_BRIGHTNESS = getattr(Config, 'MIN_BRIGHTNESS', 40)
+        self.MAX_BRIGHTNESS = getattr(Config, 'MAX_BRIGHTNESS', 220)
+    
         self.encodings_cache = {}
     
+    def check_image_quality(self, image_path):
+        """
+        Check image quality for blur, lighting, and resolution
+        Returns quality report with accept/reject decision
+        """
+        try:
+            image = cv2.imread(str(image_path))
+            if image is None:
+                return {
+                    'acceptable': False,
+                    'error': 'Could not read image file',
+                    'issues': ['Invalid image format']
+                }
+            
+            issues = []
+            warnings = []
+            
+            # 1. Check blur using Laplacian variance
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            if blur_score < self.BLUR_THRESHOLD:
+                issues.append({
+                    'type': 'blur',
+                    'severity': 'critical',
+                    'message': f'Image is too blurred (score: {blur_score:.2f})',
+                    'recommendation': 'Hold camera steady and ensure proper focus'
+                })
+            
+            # 2. Check brightness
+            mean_brightness = np.mean(gray)
+            
+            if mean_brightness < self.MIN_BRIGHTNESS:
+                issues.append({
+                    'type': 'lighting',
+                    'severity': 'critical',
+                    'message': 'Image is too dark',
+                    'recommendation': 'Improve lighting conditions'
+                })
+            elif mean_brightness > self.MAX_BRIGHTNESS:
+                warnings.append({
+                    'type': 'lighting',
+                    'severity': 'warning',
+                    'message': 'Image may be overexposed',
+                    'recommendation': 'Avoid direct bright light'
+                })
+            
+            # 3. Check resolution
+            height, width = image.shape[:2]
+            if width < 640 or height < 480:
+                warnings.append({
+                    'type': 'resolution',
+                    'severity': 'warning',
+                    'message': f'Low resolution ({width}x{height})',
+                    'recommendation': 'Use higher resolution if possible'
+                })
+            
+            # Calculate quality score
+            quality_score = 100
+            if blur_score < self.BLUR_THRESHOLD:
+                quality_score -= 50
+            if mean_brightness < self.MIN_BRIGHTNESS or mean_brightness > self.MAX_BRIGHTNESS:
+                quality_score -= 30
+            if width < 640 or height < 480:
+                quality_score -= 20
+            
+            return {
+                'acceptable': len(issues) == 0,
+                'quality_score': max(0, quality_score),
+                'blur_score': float(blur_score),
+                'brightness': float(mean_brightness),
+                'resolution': {'width': width, 'height': height},
+                'issues': issues,
+                'warnings': warnings
+            }
+            
+        except Exception as e:
+            return {
+                'acceptable': False,
+                'error': str(e),
+                'issues': [{'type': 'error', 'message': str(e)}]
+            }
+    
     def load_class_encodings(self, branch_id, year, section):
-        """
-        Load face encodings for a specific class
-        Uses your ML model's recognition logic
-        """
+        """Load face encodings for a specific class"""
         cache_key = f"{branch_id}_{year}_{section}"
         
-        # Return cached encodings if available
         if cache_key in self.encodings_cache:
             return self.encodings_cache[cache_key]
         
         try:
-            # Get encodings from database using Student model
             encodings_data = self.student_model.get_encodings_for_class(branch_id, year, section)
             
             known_encodings = []
@@ -55,30 +135,18 @@ class FaceRecognitionService:
                 'roll_numbers': known_roll_numbers
             }
             
-            # Cache the result
             self.encodings_cache[cache_key] = result
-            
             print(f"Loaded {len(known_encodings)} encodings for class {branch_id}-{year}-{section}")
             return result
             
         except Exception as e:
             print(f"Error loading encodings: {e}")
-            return {
-                'encodings': [],
-                'names': [],
-                'ids': [],
-                'roll_numbers': []
-            }
+            return {'encodings': [], 'names': [], 'ids': [], 'roll_numbers': []}
     
     def generate_encoding(self, image_path):
-        """
-        Generate face encoding from image
-        Matches your generate_encodings.py logic
-        """
+        """Generate face encoding from image"""
         try:
             image = face_recognition.load_image_file(image_path)
-            
-            # Generate encodings (your ML model logic)
             face_encodings = face_recognition.face_encodings(image)
             
             if face_encodings:
@@ -94,12 +162,39 @@ class FaceRecognitionService:
     
     def recognize_students(self, image_path, branch_id, year, section, class_subject_id=None):
         """
-        Recognize students in uploaded image
-        Matches your recognize_students.py logic with tolerance=0.46
-        
-        Returns dict with recognized and unrecognized faces
+        Recognize students with quality check
         """
         try:
+            # First check image quality
+            quality_check = self.check_image_quality(image_path)
+        
+        # ADD THIS: Resize large images for faster processing
+            import cv2
+            from PIL import Image
+        
+        # Load and resize if needed
+            img = cv2.imread(image_path)
+            height, width = img.shape[:2]
+        
+        # If image is larger than 1920px, resize it
+            max_width = 1920
+            if width > max_width:
+                scale = max_width / width
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                cv2.imwrite(image_path, img)  # Save resized version
+        
+            if not quality_check['acceptable']:
+                return {
+                    'recognized': [],
+                    'unrecognized': [],
+                    'total_faces': 0,
+                    'quality_check': quality_check,
+                    'error': 'Image quality not acceptable',
+                    'issues': quality_check.get('issues', [])
+                }
+            
             # Load class encodings
             class_encodings = self.load_class_encodings(branch_id, year, section)
             
@@ -108,10 +203,11 @@ class FaceRecognitionService:
                     'recognized': [],
                     'unrecognized': [],
                     'total_faces': 0,
+                    'quality_check': quality_check,
                     'error': 'No student encodings found for this class'
                 }
             
-            # Load and process image (your ML model logic)
+            # Load and process image
             image = face_recognition.load_image_file(image_path)
             opencv_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
             
@@ -120,15 +216,13 @@ class FaceRecognitionService:
             face_encodings = face_recognition.face_encodings(image, face_locations)
             
             print(f"Detected {len(face_locations)} face(s) in the image.")
-            print(f"Encodings generated for {len(face_encodings)} face(s).")
             
             recognized_set = set()
             recognized_list = []
             unrecognized = []
             
-            # Process each detected face (your recognize_students.py logic)
+            # Process each detected face
             for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
-                # Compare with known faces using your tolerance (0.46)
                 matches = face_recognition.compare_faces(
                     class_encodings['encodings'],
                     face_encoding,
@@ -144,7 +238,6 @@ class FaceRecognitionService:
                 roll_number = None
                 confidence = 0.0
                 
-                # Find best match (your logic)
                 if len(face_distances) > 0 and True in matches:
                     best_match_index = np.argmin(face_distances)
                     if matches[best_match_index]:
@@ -153,7 +246,6 @@ class FaceRecognitionService:
                         roll_number = class_encodings['roll_numbers'][best_match_index]
                         confidence = 1 - face_distances[best_match_index]
                 
-                # Handle recognized students
                 if name != "Unrecognized" and name not in recognized_set:
                     recognized_set.add(name)
                     recognized_list.append({
@@ -164,21 +256,14 @@ class FaceRecognitionService:
                     })
                     print(f"Recognized: {name} (confidence: {confidence:.2%})")
                 
-                # Handle unrecognized faces (your logic - save cropped image)
                 elif name == "Unrecognized":
                     top, right, bottom, left = face_location
                     face_crop = opencv_image[top:bottom, left:right]
                     
-                    # Create unrecognized folder
                     unrecognized_dir = 'uploads/unrecognized_faces'
                     os.makedirs(unrecognized_dir, exist_ok=True)
                     
-                    # Save with UUID filename (your logic)
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filename = os.path.join(
-                        unrecognized_dir,
-                        f"{uuid.uuid4().hex}.jpg"
-                    )
+                    filename = os.path.join(unrecognized_dir, f"{uuid.uuid4().hex}.jpg")
                     cv2.imwrite(filename, face_crop)
                     
                     unrecognized.append({
@@ -193,7 +278,8 @@ class FaceRecognitionService:
             result = {
                 'recognized': recognized_list,
                 'unrecognized': unrecognized,
-                'total_faces': len(face_locations)
+                'total_faces': len(face_locations),
+                'quality_check': quality_check
             }
             
             return result
@@ -204,94 +290,72 @@ class FaceRecognitionService:
             traceback.print_exc()
             raise
     
-    def batch_generate_encodings(self, images_folder):
+    def batch_recognize_students(self, image_paths, branch_id, year, section, class_subject_id=None):
         """
-        Generate encodings for all images in folder
-        Matches your generate_encodings.py with folder structure
+        Process multiple images at once for better attendance coverage
+        Returns combined results from all images
         """
-        images_folder = Path(images_folder)
+        all_recognized = {}  # Using dict to avoid duplicates
+        all_unrecognized = []
+        total_faces = 0
+        quality_reports = []
+        failed_images = []
         
-        if not images_folder.exists():
-            print(f"Error: Directory '{images_folder}' does not exist")
-            return []
-        
-        print("Starting batch encoding process...")
-        
-        encodings_list = []
-        
-        # Iterate through each person's folder (your structure)
-        for person_name in os.listdir(images_folder):
-            person_folder = images_folder / person_name
-            
-            if not person_folder.is_dir():
-                continue
-            
-            # Iterate through each image in person's folder
-            for filename in os.listdir(person_folder):
-                if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    image_path = person_folder / filename
-                    
-                    encoding = self.generate_encoding(str(image_path))
-                    
-                    if encoding is not None:
-                        encodings_list.append({
-                            'name': person_name.strip(),
-                            'encoding': encoding,
-                            'image_path': str(image_path),
-                            'filename': filename
-                        })
-                        print(f"Encoded {filename} for {person_name}")
+        for image_path in image_paths:
+            try:
+                result = self.recognize_students(
+                    image_path, branch_id, year, section, class_subject_id
+                )
+                
+                quality_reports.append({
+                    'image_path': image_path,
+                    'quality_check': result.get('quality_check')
+                })
+                
+                if not result.get('quality_check', {}).get('acceptable', False):
+                    failed_images.append({
+                        'image_path': image_path,
+                        'reason': 'quality_check_failed',
+                        'issues': result.get('issues', [])
+                    })
+                    continue
+                
+                # Merge recognized students (avoid duplicates)
+                for student in result.get('recognized', []):
+                    student_id = student['student_id']
+                    if student_id not in all_recognized:
+                        all_recognized[student_id] = student
                     else:
-                        print(f"No face found in {filename}. Skipping.")
+                        # Keep higher confidence
+                        if student['confidence'] > all_recognized[student_id]['confidence']:
+                            all_recognized[student_id] = student
+                
+                all_unrecognized.extend(result.get('unrecognized', []))
+                total_faces += result.get('total_faces', 0)
+                
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
+                failed_images.append({
+                    'image_path': image_path,
+                    'reason': 'processing_error',
+                    'error': str(e)
+                })
         
-        student_count = len(set(e['name'] for e in encodings_list))
-        print(f"\nBatch encoding complete.")
-        print(f"Total students encoded: {student_count}")
-        print(f"Total images processed: {len(encodings_list)}")
-        
-        return encodings_list
+        return {
+            'recognized': list(all_recognized.values()),
+            'unrecognized': all_unrecognized,
+            'total_faces': total_faces,
+            'images_processed': len(image_paths),
+            'images_failed': len(failed_images),
+            'quality_reports': quality_reports,
+            'failed_images': failed_images
+        }
     
     def clear_cache(self, branch_id=None, year=None, section=None):
-        """Clear encodings cache for a specific class or all"""
+        """Clear encodings cache"""
         if branch_id and year and section:
             cache_key = f"{branch_id}_{year}_{section}"
             if cache_key in self.encodings_cache:
                 del self.encodings_cache[cache_key]
-                print(f"Cache cleared for class {branch_id}-{year}-{section}")
         else:
             self.encodings_cache.clear()
-            print("All caches cleared")
-    
-    def get_face_count(self, image_path):
-        """Get number of faces in image (for validation)"""
-        try:
-            image = face_recognition.load_image_file(image_path)
-            face_locations = face_recognition.face_locations(image, model=self.model)
-            return len(face_locations)
-        except Exception as e:
-            print(f"Error counting faces: {e}")
-            return 0
-    
-    def update_tolerance(self, new_tolerance):
-        """Update recognition tolerance"""
-        self.tolerance = new_tolerance
-        print(f"Tolerance updated to {new_tolerance}")
-    
-    def validate_image_quality(self, image_path):
-        """Validate if image is suitable for recognition"""
-        try:
-            image = face_recognition.load_image_file(image_path)
-            face_locations = face_recognition.face_locations(image)
-            
-            if len(face_locations) == 0:
-                return {'valid': False, 'reason': 'No faces detected'}
-            
-            # Check image resolution
-            height, width = image.shape[:2]
-            if width < 640 or height < 480:
-                return {'valid': False, 'reason': 'Image resolution too low'}
-            
-            return {'valid': True, 'face_count': len(face_locations)}
-            
-        except Exception as e:
-            return {'valid': False, 'reason': str(e)}

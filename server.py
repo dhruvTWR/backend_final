@@ -29,6 +29,7 @@ from utils.logger import setup_logger
 from utils.excel_export import ExcelExporter
 from config import Config
 from database.db import Database 
+from utils.image_quality_checker import ImageQualityChecker
 
 
 # Initialize Flask
@@ -40,11 +41,13 @@ CORS(
     supports_credentials=True,
     origins=[
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://192.168.80.157:3000/",
         "http://localhost:5173",
         "http://192.168.1.9:5173",
         "http://192.168.80.157:5000/",
         "http://192.168.80.157:3000/",
+        "http://localhost:3001/teacher/dashboard/"
         
     ]
 )
@@ -63,6 +66,8 @@ attendance_model = Attendance()
 face_service = FaceRecognitionService()
 unrecognized_model = UnrecognizedFace()
 log_model = Log()
+
+quality_checker = ImageQualityChecker()
 
 
 
@@ -492,6 +497,335 @@ def teacher_get_subjects():
         return jsonify({'success': True, 'subjects': subjects}), 200
         
     except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ============================================================================
+# IMAGE QUALITY CHECK ENDPOINT 
+# ============================================================================
+
+@app.route('/api/teacher/attendance/check-quality', methods=['POST'])
+def check_image_quality():
+    """
+    Check image quality before processing attendance
+    Allows teacher to verify image is acceptable
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'message': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': 'No file selected'}), 400
+        
+        # Save temporary file
+        filename = secure_filename(f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}")
+        temp_path = os.path.join('uploads/attendance_images', filename)
+        file.save(temp_path)
+        
+        # Check quality
+        quality_result = face_service.check_image_quality(temp_path)
+        
+        # Get face count for preview
+        # face_count = face_service.get_face_count(temp_path)
+        # quality_result['face_count'] = face_count
+        
+        # Keep temp file for potential use
+        quality_result['temp_path'] = filename
+        
+        return jsonify({
+            'success': True,
+            'quality_check': quality_result,
+            'temp_filename': filename
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Quality check error: {e}")
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ============================================================================
+# BATCH/MULTIPLE IMAGE ATTENDANCE MARKING
+# ============================================================================
+
+@app.route('/api/teacher/attendance/mark-batch', methods=['POST'])
+def teacher_mark_attendance_batch():
+    """
+    Mark attendance using multiple images
+    Allows teachers to upload photos from different angles/rows
+    """
+    try:
+        # Check if files exist
+        if 'files' not in request.files:
+            return jsonify({'success': False, 'message': 'No files provided'}), 400
+        
+        files = request.files.getlist('files')
+        
+        if not files or len(files) == 0:
+            return jsonify({'success': False, 'message': 'No files selected'}), 400
+        
+        # Get parameters
+        class_subject_id = request.form.get('class_subject_id', type=int)
+        attendance_date_str = request.form.get('attendance_date', date.today().isoformat())
+        skip_quality_check = request.form.get('skip_quality_check', 'false').lower() == 'true'
+        
+        if not class_subject_id:
+            return jsonify({'success': False, 'message': 'class_subject_id required'}), 400
+        
+        logger.info(f"Processing batch attendance for class_subject_id: {class_subject_id}")
+        logger.info(f"Number of images: {len(files)}")
+        
+        # Parse date
+        if isinstance(attendance_date_str, str):
+            attendance_date = datetime.strptime(attendance_date_str, '%Y-%m-%d').date()
+        else:
+            attendance_date = attendance_date_str
+        
+        # Get class info
+        class_info = class_subject_model.get_class_subject_by_id(class_subject_id)
+        
+        if not class_info:
+            return jsonify({'success': False, 'message': 'Class subject not found'}), 404
+        
+        # Save all uploaded files
+        saved_files = []
+        quality_checks = []
+        
+        for idx, file in enumerate(files):
+            filename = secure_filename(f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx}_{file.filename}")
+            filepath = os.path.join('uploads/attendance_images', filename)
+            file.save(filepath)
+            
+            # Validate image
+            import cv2
+            test_img = cv2.imread(filepath)
+            if test_img is None:
+                os.remove(filepath)
+                quality_checks.append({
+                    'filename': file.filename,
+                    'acceptable': False,
+                    'error': 'Invalid image format'
+                })
+                continue
+            
+            # Check quality (unless skipped)
+            if not skip_quality_check:
+                quality_result = face_service.check_image_quality(filepath)
+                quality_checks.append({
+                    'filename': file.filename,
+                    **quality_result
+                })
+                
+                if not quality_result['acceptable']:
+                    logger.warning(f"Image {file.filename} failed quality check")
+                    # Don't delete yet - let teacher decide
+                    continue
+            
+            saved_files.append(filepath)
+            logger.info(f"Saved file {idx+1}/{len(files)}: {filepath}")
+        
+        if not saved_files:
+            return jsonify({
+                'success': False,
+                'message': 'No acceptable images found',
+                'quality_checks': quality_checks
+            }), 400
+        
+        # Process all acceptable images together
+        result = face_service.batch_recognize_students(
+            image_paths=saved_files,
+            branch_id=class_info['branch_id'],
+            year=class_info['year'],
+            section=class_info['section'],
+            class_subject_id=class_subject_id
+        )
+        
+        logger.info(f"Batch recognition result: {result}")
+        
+        # Mark attendance for all recognized students
+        attendance_ids = []
+        attendance_time = datetime.now().time()
+        
+        for student in result.get('recognized', []):
+            try:
+                attendance_id = attendance_model.mark_attendance(
+                    student_id=student['student_id'],
+                    class_subject_id=class_subject_id,
+                    attendance_date=attendance_date,
+                    attendance_time=attendance_time,
+                    status='present',
+                    confidence=student.get('confidence', 0.0),
+                    image_path=saved_files[0],  # Reference first image
+                    marked_by=session.get('user_id'),
+                    remarks=f'Batch recognition ({len(saved_files)} images)'
+                )
+                attendance_ids.append(attendance_id)
+                logger.info(f"Marked attendance for {student['name']}: {attendance_id}")
+            except Exception as e:
+                logger.error(f"Error marking attendance for {student.get('name')}: {e}")
+        
+        # Save unrecognized faces
+        unrecognized_count = 0
+        for unrec in result.get('unrecognized', []):
+            try:
+                unrec_id = unrecognized_model.add_unrecognized(
+                    class_subject_id=class_subject_id,
+                    status='absent',
+                    image_path=unrec.get('image_path', ''),
+                    original_upload=unrec.get('source_image', ''),
+                    attendance_date=attendance_date
+                )
+                if unrec_id:
+                    unrecognized_count += 1
+            except Exception as e:
+                logger.error(f"Failed to save unrecognized face: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Batch attendance marked. {len(attendance_ids)} students present.',
+            'images_processed': result.get('images_processed', 0),
+            'images_failed': result.get('images_failed', 0),
+            'total_faces': result.get('total_faces', 0),
+            'recognized_count': len(result.get('recognized', [])),
+            'unrecognized_count': len(result.get('unrecognized', [])),
+            'students': result.get('recognized', []),
+            'attendance_ids': attendance_ids,
+            'quality_checks': quality_checks,
+            'failed_images': result.get('failed_images', [])
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Batch attendance error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+# ============================================================================
+# ENHANCED SINGLE IMAGE ATTENDANCE WITH QUALITY CHECK
+# ============================================================================
+
+@app.route('/api/teacher/attendance/mark-v2', methods=['POST'])
+def teacher_mark_attendance_v2():
+    """
+    Enhanced version with automatic quality check
+    Replaces old /mark endpoint
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'message': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'message': 'No file selected'}), 400
+        
+        class_subject_id = request.form.get('class_subject_id', type=int)
+        attendance_date_str = request.form.get('attendance_date', date.today().isoformat())
+        force_process = request.form.get('force_process', 'false').lower() == 'true'
+        
+        if not class_subject_id:
+            return jsonify({'success': False, 'message': 'class_subject_id required'}), 400
+        
+        # Parse date
+        if isinstance(attendance_date_str, str):
+            attendance_date = datetime.strptime(attendance_date_str, '%Y-%m-%d').date()
+        else:
+            attendance_date = attendance_date_str
+        
+        # Get class info
+        class_info = class_subject_model.get_class_subject_by_id(class_subject_id)
+        
+        if not class_info:
+            return jsonify({'success': False, 'message': 'Class subject not found'}), 404
+        
+        # Save file
+        filename = secure_filename(f"att_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}")
+        filepath = os.path.join('uploads/attendance_images', filename)
+        file.save(filepath)
+        
+        # Validate image
+        import cv2
+        test_img = cv2.imread(filepath)
+        if test_img is None:
+            os.remove(filepath)
+            return jsonify({'success': False, 'message': 'Invalid image file'}), 400
+        
+        # Check quality first
+        quality_check = face_service.check_image_quality(filepath)
+        
+        if not quality_check['acceptable'] and not force_process:
+            return jsonify({
+                'success': False,
+                'message': 'Image quality not acceptable',
+                'quality_check': quality_check,
+                'can_force': True,  # Allow teacher to override
+                'temp_filename': filename
+            }), 400
+        
+        # Process attendance
+        result = face_service.recognize_students(
+            image_path=filepath,
+            branch_id=class_info['branch_id'],
+            year=class_info['year'],
+            section=class_info['section'],
+            class_subject_id=class_subject_id
+        )
+        
+        # Mark attendance
+        attendance_ids = []
+        attendance_time = datetime.now().time()
+        
+        for student in result.get('recognized', []):
+            try:
+                attendance_id = attendance_model.mark_attendance(
+                    student_id=student['student_id'],
+                    class_subject_id=class_subject_id,
+                    attendance_date=attendance_date,
+                    attendance_time=attendance_time,
+                    status='present',
+                    confidence=student.get('confidence', 0.0),
+                    image_path=filepath,
+                    marked_by=session.get('user_id'),
+                    remarks='Face recognition'
+                )
+                attendance_ids.append(attendance_id)
+            except Exception as e:
+                logger.error(f"Error marking attendance: {e}")
+        
+        # Save unrecognized
+        unrecognized_count = 0
+        for unrec in result.get('unrecognized', []):
+            try:
+                unrec_id = unrecognized_model.add_unrecognized(
+                    class_subject_id=class_subject_id,
+                    status='absent',
+                    image_path=unrec.get('image_path', ''),
+                    original_upload=filepath,
+                    attendance_date=attendance_date
+                )
+                if unrec_id:
+                    unrecognized_count += 1
+            except Exception as e:
+                logger.error(f"Failed to save unrecognized: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Attendance marked. {len(attendance_ids)} students present.',
+            'total_faces': result.get('total_faces', 0),
+            'recognized_count': len(result.get('recognized', [])),
+            'unrecognized_count': len(result.get('unrecognized', [])),
+            'students': result.get('recognized', []),
+            'attendance_ids': attendance_ids,
+            'quality_check': quality_check,
+            'was_forced': force_process
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Mark attendance v2 error: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
 
 

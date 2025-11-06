@@ -23,6 +23,9 @@ class Config:
     
     # Face Recognition Configuration
     ENCODINGS_FILE = 'encodings.pickle'
+    BLUR_THRESHOLD = 0         # Lower = more lenient
+    MIN_BRIGHTNESS = 0
+    MAX_BRIGHTNESS = 10000000000
     RECOGNITION_TOLERANCE = 0.46  # Lower is more strict
     DETECTION_MODEL = 'hog'  # 'hog' or 'cnn' (cnn is more accurate but slower)
     NUM_JITTERS = 1  # Higher number increases accuracy but slower
