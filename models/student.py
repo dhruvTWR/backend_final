@@ -38,33 +38,34 @@ class Student:
             print(f"Error adding student: {e}")
             raise
     
-    # def get_student_by_id(self, student_id):
-    #     """Get student by ID"""
-    #     try:
-    #         conn = self.db.get_connection()
-    #         cursor = conn.cursor(dictionary=True)
+    def get_student_by_id(self, student_id):
+        """Get student by ID"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor(dictionary=True)
             
-    #         query = """
-    #             SELECT s.*, b.branch_name, b.branch_code
-    #             FROM students s
-    #             JOIN branches b ON s.branch_id = b.id
-    #             WHERE s.id = %s AND s.is_active = TRUE
-    #         """
-    #         cursor.execute(query, (student_id,))
-    #         student = cursor.fetchone()
+            query = """
+                SELECT s.*, b.branch_name, b.branch_code
+                FROM students s
+                JOIN branches b ON s.branch_id = b.id
+                WHERE s.id = %s AND s.is_active = TRUE
+            """
+            cursor.execute(query, (student_id,))
+            student = cursor.fetchone()
             
-    #         # Deserialize face encoding if present
-    #         if student and student['face_encoding']:
-    #             student['face_encoding'] = pickle.loads(student['face_encoding'])
+            # Deserialize face encoding if present
+            if student and student['face_encoding']:
+                student['face_encoding'] = pickle.loads(student['face_encoding'])
             
-    #         cursor.close()
-    #         conn.close()
+            cursor.close()
+            conn.close()
             
-    #         return student
+            return student
             
-    #     except Exception as e:
-    #         print(f"Error getting student: {e}")
-    #         raise
+        except Exception as e:
+            print(f"Error getting student: {e}")
+            raise
+    
     
     
     
@@ -95,7 +96,71 @@ class Student:
             print(f"Error getting students by class: {e}")
             raise
     
+    def get_all_students(self, branch_id=None, year=None):
+        """Get all students with optional filters"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            
+            # Build query with optional filters
+            query = """
+                SELECT s.id, s.roll_number, s.name, s.email, s.year, s.section,
+                       b.branch_name, b.branch_code, s.photo_path
+                FROM students s
+                JOIN branches b ON s.branch_id = b.id
+                WHERE s.is_active = TRUE
+            """
+            params = []
+            
+            if branch_id:
+                query += " AND s.branch_id = %s"
+                params.append(branch_id)
+            
+            if year:
+                query += " AND s.year = %s"
+                params.append(year)
+            
+            query += " ORDER BY s.year, s.section, s.roll_number"
+            
+            cursor.execute(query, tuple(params))
+            students = cursor.fetchall()
+            
+            cursor.close()
+            conn.close()
+            
+            return students
+            
+        except Exception as e:
+            print(f"Error getting all students: {e}")
+            raise
     
+    
+    def get_class_strength(self, branch_id, year, section):
+        """Get count of students with photo/face data in a class"""
+        try:
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            query = """
+                SELECT COUNT(*) as count
+                FROM students s
+                WHERE s.branch_id = %s AND s.year = %s AND s.section = %s 
+                      AND s.is_active = TRUE AND s.photo_path IS NOT NULL
+            """
+            cursor.execute(query, (branch_id, year, section))
+            result = cursor.fetchone()
+            
+            count = result[0] if result else 0
+            print(f"[CLASS STRENGTH] branch_id={branch_id}, year={year}, section={section} => count={count}")
+            
+            cursor.close()
+            conn.close()
+            
+            return count
+            
+        except Exception as e:
+            print(f"Error getting class strength: {e}")
+            raise
     
     def update_student(self, student_id, **kwargs):
         """Update student information"""
@@ -321,48 +386,38 @@ class Student:
     # def get_encodings_for_class(self, branch_id, year, section):
     #     try:
     #         conn = self.db.get_connection()
-    #         cursor = conn.cursor(dictionary=True)
-        
-    #         cursor.execute("""
-    #             SELECT 
-    #                 id as student_id,
-    #                 roll_number,
-    #                 name,
-    #                 face_encoding
-    #             FROM students
-    #             WHERE branch_id = %s 
-    #             AND year = %s 
-    #             AND section = %s
-    #             AND is_active = TRUE
-    #             AND face_encoding IS NOT NULL
-    #             ORDER BY roll_number
-    #         """, (branch_id, year, section))
-        
-    #         students = cursor.fetchall()
-    #         cursor.close()
-    #         conn.close()
-        
-    #         # Deserialize face encodings
-    #         result = []
-    #         for student in students:
-    #             if student['face_encoding']:
-    #                 try:
-    #                     import pickle
-    #                     encoding = pickle.loads(student['face_encoding'])
-    #                     result.append({
-    #                         'student_id': student['student_id'],
-    #                         'name': student['name'],
-    #                         'roll_number': student['roll_number'],
-    #                         'encoding': encoding
-    #                     })
-    #                 except Exception as e:
-    #                     print(f"Error deserializing encoding for {student['name']}: {e}")
-        
-    #         print(f"Loaded {len(result)} encodings for class {branch_id}-{year}-{section}")
-    #         return result
-        
-    #     except Exception as e:
-    #         print(f"Error getting encodings for class: {e}")
-    #         import traceback
-    #         traceback.print_exc()
-    #         raise
+    def promote_students_to_next_year(self, current_year, branch_id=None):
+        """Promote all students from current year to next year"""
+        try:
+            next_year = current_year + 1
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # Build query based on branch_id
+            if branch_id:
+                query = """
+                    UPDATE students 
+                    SET year = %s
+                    WHERE year = %s AND branch_id = %s AND is_active = TRUE
+                """
+                cursor.execute(query, (next_year, current_year, branch_id))
+            else:
+                query = """
+                    UPDATE students 
+                    SET year = %s
+                    WHERE year = %s AND is_active = TRUE
+                """
+                cursor.execute(query, (next_year, current_year))
+            
+            affected_rows = cursor.rowcount
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            print(f"Promoted {affected_rows} students from Year {current_year} to Year {next_year}")
+            return affected_rows
+            
+        except Exception as e:
+            print(f"Error promoting students: {e}")
+            raise
+    

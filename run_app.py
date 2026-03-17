@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Smart Attendance System Launcher
-Initializes all components and starts the Flask server
+Smart Attendance System - Application Launcher
+Entry point for development and setup
 """
 
 import os
 import sys
 import socket
-import webbrowser
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 
 def get_local_ip():
     """Get local IP address for network access"""
@@ -21,103 +25,85 @@ def get_local_ip():
     except Exception:
         return "localhost"
 
-def create_directories():
-    """Create required directories if they don't exist"""
-    directories = [
-        'uploads',
-        'student_images',
-        'unrecognized',
-        'exports',
-        'backups',
-        'logs',
-        'templates',
-        'static',
-        'database',
-        'recognition',
-        'utils'
-    ]
-    
-    for directory in directories:
-        Path(directory).mkdir(parents=True, exist_ok=True)
-    
-    # Create __init__.py files for packages
-    packages = ['database', 'recognition', 'utils']
-    for package in packages:
-        init_file = Path(package) / '__init__.py'
-        if not init_file.exists():
-            init_file.touch()
-
-def check_dependencies():
-    """Check if all required packages are installed"""
-    required_packages = [
-        'flask',
-        'flask_cors',
-        'mysql.connector',
-        'cv2',
-        'face_recognition',
-        'openpyxl'
-    ]
-    
-    missing_packages = []
-    
-    for package in required_packages:
-        try:
-            if package == 'mysql.connector':
-                import mysql.connector
-            elif package == 'cv2':
-                import cv2
-            else:
-                __import__(package)
-        except ImportError:
-            missing_packages.append(package)
-    
-    if missing_packages:
-        print("❌ Missing required packages:")
-        for package in missing_packages:
-            print(f"   - {package}")
-        print("\n💡 Install missing packages with:")
-        print("   pip install -r requirements.txt")
-        return False
-    
-    return True
-
-def check_mysql_connection():
-    """Check if MySQL is accessible"""
-    try:
-        import mysql.connector
-        from config import Config
-        
-        conn = mysql.connector.connect(
-            host=Config.DB_HOST,
-            user=Config.DB_USER,
-            password=Config.DB_PASSWORD
-        )
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"❌ MySQL connection failed: {e}")
-        print("\n💡 Make sure MySQL is running and credentials are correct in config.py")
-        return False
 
 def print_banner():
     """Print application banner"""
     banner = """
-    ╔═══════════════════════════════════════════════════════╗
-    ║                                                       ║
-    ║        📸  SMART ATTENDANCE SYSTEM  📊                ║
-    ║                                                       ║
-    ║         Face Recognition Based Attendance            ║
-    ║                                                       ║
-    ╚═══════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════╗
+║                                                        ║
+║       📸 SMART ATTENDANCE SYSTEM - API SERVER 📊      ║
+║                                                        ║
+║         Face Recognition Based Attendance             ║
+║                      v2.0                             ║
+║                                                        ║
+╚════════════════════════════════════════════════════════╝
     """
     print(banner)
 
-def print_access_info(port=5000):
-    """Print access information"""
+
+def print_access_info(host, port):
+    """Print server access information"""
     local_ip = get_local_ip()
     
-    print("\n" + "="*55)
-    print("🚀 SERVER STARTED SUCCESSFULLY!")
+    print("\n" + "="*60)
+    print("🚀  SERVER STARTED SUCCESSFULLY!")
+    print("="*60)
+    print(f"\n📱 Access the server at:")
+    print(f"   Local:     http://localhost:{port}")
+    print(f"   Network:   http://{local_ip}:{port}")
+    print(f"\n📚 API Documentation:")
+    print(f"   Endpoints: http://localhost:{port}/api/")
+    print(f"   Health:    http://localhost:{port}/api/health")
+    print(f"\n✅ Status: Running")
+    print(f"🔐 CORS Enabled: Yes")
+    print(f"🐍 Python: Yes (Modular Structure)")
+    print("\n⚠️  Press CTRL+C to stop the server")
+    print("="*60 + "\n")
+
+
+def main():
+    """Main entry point"""
+    
+    print_banner()
+    
+    # Create Flask app
+    from app import create_app
+    
+    app = create_app()
+    
+    # Get host and port
+    host = os.environ.get('HOST', '0.0.0.0')
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('DEBUG', 'False') == 'True'
+    
+    print_access_info(host, port)
+    
+    # Run application
+    try:
+        app.run(
+            host=host,
+            port=port,
+            debug=debug,
+            use_reloader=debug,
+            use_debugger=debug
+        )
+    except KeyboardInterrupt:
+        print("\n\n✋ Server stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    # Set up variables for printing access URLs
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    from socket import gethostbyname, gethostname
+    try:
+        local_ip = gethostbyname(gethostname())
+    except Exception:
+        local_ip = 'localhost'
     print("="*55)
     print(f"\n📍 Access URLs:")
     print(f"   Local:    http://localhost:{port}")
@@ -134,15 +120,71 @@ def initialize_system():
     
     # Create directories
     print("   ✓ Creating directories...")
+    def create_directories():
+        """Create required directories for the system"""
+        required_dirs = [
+            "logs",
+            "uploads",
+            "attendance_data",
+            "models"
+        ]
+        for d in required_dirs:
+            Path(d).mkdir(parents=True, exist_ok=True)
+        print("      - Directories created:", ", ".join(required_dirs))
+
     create_directories()
     
     # Check dependencies
     print("   ✓ Checking dependencies...")
+    def check_dependencies():
+        """Check for required Python dependencies"""
+        required_packages = {
+            "flask": "flask",
+            "mysql.connector": "mysql",
+            "python-dotenv": "dotenv",
+            "requests": "requests",
+            "opencv-python": "cv2",
+            "face-recognition": "face_recognition"
+        }
+        missing = []
+        for pkg_name, import_name in required_packages.items():
+            try:
+                __import__(import_name)
+            except ImportError:
+                missing.append(pkg_name)
+        if missing:
+            print(f"   ⚠️  Missing dependencies: {', '.join(missing)}")
+            print("      Please install them using pip before continuing.")
+            return False
+        print("      - All dependencies satisfied.")
+        return True
+
     if not check_dependencies():
         sys.exit(1)
     
     # Check MySQL
     print("   ✓ Checking MySQL connection...")
+    def check_mysql_connection():
+        """Check if MySQL connection can be established"""
+        try:
+            import mysql.connector
+            from mysql.connector import Error
+            from config import Config
+            
+            connection = mysql.connector.connect(
+                host=Config.DB_HOST,
+                user=Config.DB_USER,
+                password=Config.DB_PASSWORD,
+                database=Config.DB_NAME
+            )
+            if connection.is_connected():
+                connection.close()
+                print("      - MySQL connection successful.")
+                return True
+        except Exception as e:
+            print(f"      ⚠️  MySQL connection failed: {e}")
+            return False
+
     if not check_mysql_connection():
         response = input("\nContinue anyway? (y/n): ")
         if response.lower() != 'y':
@@ -163,23 +205,24 @@ def main():
     """Main entry point"""
     # Set working directory to script location
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    
+
     # Print banner
     print_banner()
-    
+
     # Initialize system
     initialize_system()
-    
+
     # Import and start Flask app
     try:
-        from server import app
+        from app import create_app
         from config import Config
-        
+
+        app = create_app()
         port = Config.PORT
-        
+
         # Print access info
-        print_access_info(port)
-        
+        print_access_info(Config.HOST, port)
+
         # Start server
         app.run(
             host=Config.HOST,
@@ -187,7 +230,7 @@ def main():
             debug=Config.DEBUG,
             use_reloader=False  # Disable reloader for cleaner startup
         )
-        
+
     except KeyboardInterrupt:
         print("\n\n👋 Server stopped by user")
         sys.exit(0)

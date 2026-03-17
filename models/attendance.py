@@ -227,19 +227,31 @@ class Attendance:
             conn = self.db.get_connection()
             cursor = conn.cursor(dictionary=True)
             
+            # First, get class info to filter by year/branch/section
+            class_info_query = """
+                SELECT branch_id, year, section FROM class_subjects WHERE id = %s
+            """
+            cursor.execute(class_info_query, (class_subject_id,))
+            class_info = cursor.fetchone()
+            
+            if not class_info:
+                return []
+            
+            # Build query with date filters in JOIN
             query = """
                 SELECT 
                     s.id as student_id,
                     s.roll_number,
                     s.name,
-                    COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
-                    COUNT(a.id) as total_classes,
-                    ROUND((COUNT(CASE WHEN a.status = 'present' THEN 1 END) * 100.0 / 
-                           NULLIF(COUNT(a.id), 0)), 2) as attendance_percentage
+                    COUNT(DISTINCT CASE WHEN a.status = 'present' THEN a.attendance_date END) as present_count,
+                    COUNT(DISTINCT a.attendance_date) as total_classes,
+                    ROUND((COUNT(DISTINCT CASE WHEN a.status = 'present' THEN a.attendance_date END) * 100.0 / 
+                           NULLIF(COUNT(DISTINCT a.attendance_date), 0)), 2) as attendance_percentage
                 FROM students s
                 LEFT JOIN attendance a ON s.id = a.student_id 
                     AND a.class_subject_id = %s
             """
+            
             params = [class_subject_id]
             
             if start_date:
@@ -251,10 +263,15 @@ class Attendance:
                 params.append(end_date)
             
             query += """
-                WHERE s.is_active = TRUE
+                WHERE s.is_active = TRUE 
+                    AND s.branch_id = %s 
+                    AND s.year = %s 
+                    AND s.section = %s
                 GROUP BY s.id, s.roll_number, s.name
                 ORDER BY s.roll_number
             """
+            
+            params.extend([class_info['branch_id'], class_info['year'], class_info['section']])
             
             cursor.execute(query, tuple(params))
             report = cursor.fetchall()
@@ -309,11 +326,11 @@ class Attendance:
             conn = self.db.get_connection()
             cursor = conn.cursor()
             
-            # Calculate totals
+            # Calculate totals - count UNIQUE DATES for total_classes
             query = """
                 SELECT 
-                    COUNT(*) as total_classes,
-                    SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as classes_attended
+                    COUNT(DISTINCT attendance_date) as total_classes,
+                    COUNT(DISTINCT CASE WHEN status = 'present' THEN attendance_date END) as classes_attended
                 FROM attendance
                 WHERE student_id = %s AND class_subject_id = %s
             """

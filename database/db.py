@@ -169,6 +169,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS unrecognized_faces (
                     id INT PRIMARY KEY AUTO_INCREMENT,
                     class_subject_id INT NOT NULL,
+                    status ENUM('present', 'absent') DEFAULT 'absent',
                     image_path VARCHAR(255) NOT NULL,
                     original_upload VARCHAR(255),
                     attendance_date DATE NOT NULL,
@@ -182,6 +183,15 @@ class Database:
                     INDEX idx_unresolved (resolved, attendance_date)
                 ) ENGINE=InnoDB
             """)
+            
+            # Add status column if it doesn't exist (for existing tables)
+            try:
+                cursor.execute("""
+                    ALTER TABLE unrecognized_faces ADD COLUMN status ENUM('present', 'absent') DEFAULT 'absent'
+                """)
+            except Error:
+                # Column already exists, ignore error
+                pass
             
             # =============================================
             # 9. LOGS TABLE

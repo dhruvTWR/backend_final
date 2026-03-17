@@ -6,34 +6,13 @@ class UnrecognizedFace:
     def __init__(self):
         self.db = Database()
     
-    def add_unrecognized(self, class_subject_id, image_path, original_upload, attendance_date):
-        """Add unrecognized face record"""
-        try:
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-        
-            cursor.execute("""
-                INSERT INTO unrecognized_faces 
-                (class_subject_id, image_path, original_upload, attendance_date, detected_at)
-                VALUES (%s, %s, %s, %s, NOW())
-            """, (class_subject_id, image_path, original_upload, attendance_date))
-        
-            unrec_id = cursor.lastrowid
-            conn.commit()
-            cursor.close()
-            conn.close()
-        
-            return unrec_id
-        
-        except Exception as e:
-            print(f"Error adding unrecognized face: {e}")
-            return None
-    def add_unrecognized(self, class_subject_id, image_path, original_upload, attendance_date):
+    def add_unrecognized(self, class_subject_id, status, image_path, original_upload, attendance_date):
         """
         Add unrecognized face record
         
         Args:
             class_subject_id: Which class/subject this face was detected in
+            status: Attendance status ('present', 'absent')
             image_path: Path to saved cropped face image
             original_upload: Path to original uploaded classroom photo
             attendance_date: Date of attendance session
@@ -41,22 +20,21 @@ class UnrecognizedFace:
         try:
             conn = self.db.get_connection()
             cursor = conn.cursor()
-            
-            query = """
+        
+            cursor.execute("""
                 INSERT INTO unrecognized_faces 
-                (class_subject_id, image_path, original_upload, attendance_date)
-                VALUES (%s, %s, %s, %s)
-            """
-            cursor.execute(query, (class_subject_id, image_path, original_upload, attendance_date))
-            
-            unrecognized_id = cursor.lastrowid
+                (class_subject_id, status, image_path, original_upload, attendance_date, detected_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+            """, (class_subject_id, status, image_path, original_upload, attendance_date))
+        
+            unrec_id = cursor.lastrowid
             conn.commit()
             cursor.close()
             conn.close()
             
             print(f"Unrecognized face saved: {image_path}")
-            return unrecognized_id
-            
+            return unrec_id
+        
         except Exception as e:
             print(f"Error adding unrecognized face: {e}")
             raise
